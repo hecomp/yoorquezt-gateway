@@ -6,7 +6,7 @@ pipeline {
     environment {
         GO111MODULE = 'on'
         CGO_ENABLED = 0
-        GOPRIVATE = 'github.com/hecomp'
+        GOPRIVATE="github.com/hecomp"
         GOPATH = "${JENKINS_HOME}/jobs/${JOB_NAME}/builds/${BUILD_ID}"
     }
     stages {
