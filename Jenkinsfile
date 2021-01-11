@@ -4,9 +4,11 @@ pipeline {
         go 'go1.14'
     }
     environment {
-        GO111MODULE = 'on'
+        GO114MODULE = 'on'
         CGO_ENABLED = 0
-        GOPRIVATE="github.com/hecomp"
+        GONOPROXY='github.com/hecomp'
+        GONOSUMDB='github.com/hecomp'
+        GOPRIVATE='github.com/hecomp'
         GOPATH = "${JENKINS_HOME}/jobs/${JOB_NAME}/builds/${BUILD_ID}"
     }
     stages {
