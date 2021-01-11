@@ -16,6 +16,7 @@ pipeline {
             steps {
                 echo 'Installing dependencies'
                 sh 'go version'
+                sh 'echo $GOPRIVATE'
                 sh 'go get -u golang.org/x/lint/golint'
             }
         }
