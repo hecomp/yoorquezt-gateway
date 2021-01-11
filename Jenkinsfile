@@ -4,7 +4,7 @@ pipeline {
         go 'go1.14'
     }
     environment {
-        GO114MODULE = 'on'
+        GO111MODULE = 'on'
         CGO_ENABLED = 0
         GONOPROXY='github.com/hecomp'
         GONOSUMDB='github.com/hecomp'
