@@ -1,36 +1,43 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	consulsd "github.com/go-kit/kit/sd/consul"
 	"github.com/gorilla/mux"
 	"github.com/hashicorp/consul/api"
-	stdopentracing "github.com/opentracing/opentracing-go"
-	stdzipkin "github.com/openzipkin/zipkin-go"
-	"google.golang.org/grpc"
+	//stdopentracing "github.com/opentracing/opentracing-go"
+	//stdzipkin "github.com/openzipkin/zipkin-go"
+	//"google.golang.org/grpc"
 
 	"github.com/go-kit/kit/endpoint"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/sd"
 	"github.com/go-kit/kit/sd/lb"
-	
-	"github.com/hecomp/yoorquezt-auth/pkg/yoorqueztendpoint"
-	"github.com/hecomp/yoorquezt-auth/pkg/yoorqueztservice"
-	"github.com/hecomp/yoorquezt-auth/pkg/yoorquezttransport"
+	httptransport "github.com/go-kit/kit/transport/http"
+
+	//"github.com/hecomp/yoorquezt-auth/pkg/yoorqueztendpoint"
+	//"github.com/hecomp/yoorquezt-auth/pkg/yoorqueztservice"
+	//"github.com/hecomp/yoorquezt-auth/pkg/yoorquezttransport"
 )
 
 func main() {
 	var (
 		httpAddr     = flag.String("http.addr", ":8000", "Address for HTTP (JSON) server")
-		consulAddr   = flag.String("consul.addr", "", "Consul agent address")
+		consulAddr   = flag.String("consul.addr", ":8500", "Consul agent address")
 		retryMax     = flag.Int("retry.max", 3, "per-request retries to different instances")
 		retryTimeout = flag.Duration("retry.timeout", 500*time.Millisecond, "per-request timeout, including retries")
 	)
@@ -60,47 +67,50 @@ func main() {
 	}
 
 	// Transport domain.
-	tracer := stdopentracing.GlobalTracer() // no-op
-	zipkinTracer, _ := stdzipkin.NewTracer(nil, stdzipkin.WithNoopTracer(true))
+	//tracer := stdopentracing.GlobalTracer() // no-op
+	//zipkinTracer, _ := stdzipkin.NewTracer(nil, stdzipkin.WithNoopTracer(true))
+	ctx := context.Background()
 	r := mux.NewRouter()
 
 	// Now we begin installing the routes. Each route corresponds to a single
-	// method: sum, concat, uppercase, and count.
+	// method: signup, concat.
 
-	// addsvc routes.
+	// yoorqueztauthsvc routes.
 	{
-		// Each method gets constructed with a factory. Factories take an
-		// instance string, and return a specific endpoint. In the factory we
-		// dial the instance string we get from Consul, and then leverage an
-		// addsvc client package to construct a complete service. We can then
-		// leverage the addsvc.Make{Sum,Concat}Endpoint constructors to convert
-		// the complete service to specific endpoint.
+		// addsvc had lots of nice importable Go packages we could leverage.
+		// With yoorqueztauthsvc we are not so fortunate, it just has some endpoints
+		// that we assume will exist. So we have to write that logic here. This
+		// is by design, so you can see two totally different methods of
+		// proxying to a remote service.
+
 		var (
 			tags        = []string{}
 			passingOnly = true
-			endpoints   = yoorqueztendpoint.Set{}
-			instancer   = consulsd.NewInstancer(client, logger, "yoorqueztsvc", tags, passingOnly)
+			uppercase   endpoint.Endpoint
+			count       endpoint.Endpoint
+			instancer   = consulsd.NewInstancer(client, logger, "yoorqueztauthsvc", tags, passingOnly)
 		)
 		{
-			factory := yoorqueztsvcFactory(yoorqueztendpoint.MakeSumEndpoint, tracer, zipkinTracer, logger)
+			factory := yoorqueztauthsvcFactory(ctx, "POST", "/signup")
 			endpointer := sd.NewEndpointer(instancer, factory, logger)
 			balancer := lb.NewRoundRobin(endpointer)
 			retry := lb.Retry(*retryMax, *retryTimeout, balancer)
-			endpoints.SumEndpoint = retry
+			uppercase = retry
 		}
 		{
-			factory := yoorqueztsvcFactory(yoorqueztendpoint.MakeConcatEndpoint, tracer, zipkinTracer, logger)
+			factory := yoorqueztauthsvcFactory(ctx, "POST", "/concat")
 			endpointer := sd.NewEndpointer(instancer, factory, logger)
 			balancer := lb.NewRoundRobin(endpointer)
 			retry := lb.Retry(*retryMax, *retryTimeout, balancer)
-			endpoints.ConcatEndpoint = retry
+			count = retry
 		}
 
-		// Here we leverage the fact that yoorqueztsvc comes with a constructor for an
-		// HTTP handler, and just install it under a particular path prefix in
-		// our router.
+		// We can use the transport/http.Server to act as our handler, all we
+		// have to do provide it with the encode and decode functions for our
+		// yoorqueztauthsvc methods.
 
-		r.PathPrefix("/yoorqueztsvc").Handler(http.StripPrefix("/yoorqueztsvc", yoorquezttransport.NewHTTPHandler(endpoints, tracer, zipkinTracer, logger)))
+		r.Handle("/yoorqueztauthsvc/signup", httptransport.NewServer(uppercase, decodeSignupRequest, encodeJSONResponse))
+		r.Handle("/yoorqueztauthsvc/concat", httptransport.NewServer(count, decodeConcatRequest, encodeJSONResponse))
 	}
 
 	// Interrupt handler.
@@ -121,27 +131,104 @@ func main() {
 	logger.Log("exit", <-errc)
 }
 
-func yoorqueztsvcFactory(makeEndpoint func(yoorqueztservice.Service) endpoint.Endpoint, tracer stdopentracing.Tracer, zipkinTracer *stdzipkin.Tracer, logger log.Logger) sd.Factory {
+func yoorqueztauthsvcFactory(ctx context.Context, method, path string) sd.Factory {
 	return func(instance string) (endpoint.Endpoint, io.Closer, error) {
-		// We could just as easily use the HTTP or Thrift client package to make
-		// the connection to yoorqueztsvc. We've chosen gRPC arbitrarily. Note that
-		// the transport is an implementation detail: it doesn't leak out of
-		// this function. Nice!
-
-		conn, err := grpc.Dial(instance, grpc.WithInsecure())
+		if !strings.HasPrefix(instance, "http") {
+			instance = "http://" + instance
+		}
+		tgt, err := url.Parse(instance)
 		if err != nil {
 			return nil, nil, err
 		}
-		service := yoorquezttransport.NewGRPCClient(conn, tracer, zipkinTracer, logger)
-		endpoint := makeEndpoint(service)
+		tgt.Path = path
 
-		// Notice that the yoorqueztsvc gRPC client converts the connection to a
-		// complete yoorqueztsvc, and we just throw away everything except the method
-		// we're interested in. A smarter factory would mux multiple methods
-		// over the same connection. But that would require more work to manage
-		// the returned io.Closer, e.g. reference counting. Since this is for
-		// the purposes of demonstration, we'll just keep it simple.
+		// Since yoorqueztauthsvc doesn't have any kind of package we can import, or
+		// any formal spec, we are forced to just assert where the endpoints
+		// live, and write our own code to encode and decode requests and
+		// responses. Ideally, if you write the service, you will want to
+		// provide stronger guarantees to your clients.
 
-		return endpoint, conn, nil
+		var (
+			enc httptransport.EncodeRequestFunc
+			dec httptransport.DecodeResponseFunc
+		)
+		switch path {
+		case "/signup":
+			enc, dec = encodeJSONRequest, decodeSignupResponse
+		case "/concat":
+			enc, dec = encodeJSONRequest, decodeConcatResponse
+		default:
+			return nil, nil, fmt.Errorf("unknown yoorqueztauthsvc path %q", path)
+		}
+
+		return httptransport.NewClient(method, tgt, enc, dec).Endpoint(), nil, nil
 	}
+}
+
+func encodeJSONResponse(_ context.Context, w http.ResponseWriter, response interface{}) error {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	return json.NewEncoder(w).Encode(response)
+}
+
+func encodeJSONRequest(_ context.Context, req *http.Request, request interface{}) error {
+	// Both uppercase and count requests are encoded in the same way:
+	// simple JSON serialization to the request body.
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(request); err != nil {
+		return err
+	}
+	req.Body = ioutil.NopCloser(&buf)
+	return nil
+}
+
+func decodeSignupResponse(ctx context.Context, resp *http.Response) (interface{}, error) {
+	var response struct {
+		Status  bool        `json:"status"`
+		Message string   `json:",omitempty"`
+		Data    interface{} `json:"data"`
+		Err     error `json:"err,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func decodeConcatResponse(ctx context.Context, resp *http.Response) (interface{}, error) {
+	var response struct {
+		V   string `json:"v"`
+		Err error  `json:"-"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func decodeSignupRequest(ctx context.Context, req *http.Request) (interface{}, error) {
+	var request struct {
+		ID         string    `json:"id" sql:"id"`
+		Email      string    `json:"email" validate:"required" sql:"email"`
+		Password   string    `json:"password" validate:"required" sql:"password"`
+		Username   string    `json:"username" sql:"username"`
+		TokenHash  string    `json:"tokenhash" sql:"tokenhash"`
+		IsVerified bool      `json:"isverified" sql:"isverified"`
+		CreatedAt  time.Time `json:"createdat" sql:"createdat"`
+		UpdatedAt  time.Time `json:"updatedat" sql:"updatedat"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+		return nil, err
+	}
+	return request, nil
+}
+
+func decodeConcatRequest(ctx context.Context, req *http.Request) (interface{}, error) {
+	var request struct {
+		Code string `json: "code"`
+		Type string `json" "type"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+		return nil, err
+	}
+	return request, nil
 }
