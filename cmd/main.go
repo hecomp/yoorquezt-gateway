@@ -29,7 +29,6 @@ import (
 	"github.com/go-kit/kit/sd/lb"
 	httptransport "github.com/go-kit/kit/transport/http"
 
-	//"github.com/hecomp/yoorquezt-auth/pkg/yoorqueztendpoint"
 	//"github.com/hecomp/yoorquezt-auth/pkg/yoorqueztservice"
 	//"github.com/hecomp/yoorquezt-auth/pkg/yoorquezttransport"
 )
@@ -73,7 +72,7 @@ func main() {
 	r := mux.NewRouter()
 
 	// Now we begin installing the routes. Each route corresponds to a single
-	// method: signup, concat.
+	// method: signup, login.
 
 	// yoorqueztauthsvc routes.
 	{
@@ -98,7 +97,7 @@ func main() {
 			uppercase = retry
 		}
 		{
-			factory := yoorqueztauthsvcFactory(ctx, "POST", "/concat")
+			factory := yoorqueztauthsvcFactory(ctx, "POST", "/login")
 			endpointer := sd.NewEndpointer(instancer, factory, logger)
 			balancer := lb.NewRoundRobin(endpointer)
 			retry := lb.Retry(*retryMax, *retryTimeout, balancer)
@@ -110,7 +109,7 @@ func main() {
 		// yoorqueztauthsvc methods.
 
 		r.Handle("/yoorqueztauthsvc/signup", httptransport.NewServer(uppercase, decodeSignupRequest, encodeJSONResponse))
-		r.Handle("/yoorqueztauthsvc/concat", httptransport.NewServer(count, decodeConcatRequest, encodeJSONResponse))
+		r.Handle("/yoorqueztauthsvc/login", httptransport.NewServer(count, decodeLoginRequest, encodeJSONResponse))
 	}
 
 	// Interrupt handler.
@@ -155,8 +154,8 @@ func yoorqueztauthsvcFactory(ctx context.Context, method, path string) sd.Factor
 		switch path {
 		case "/signup":
 			enc, dec = encodeJSONRequest, decodeSignupResponse
-		case "/concat":
-			enc, dec = encodeJSONRequest, decodeConcatResponse
+		case "/login":
+			enc, dec = encodeJSONRequest, decodeLoginResponse
 		default:
 			return nil, nil, fmt.Errorf("unknown yoorqueztauthsvc path %q", path)
 		}
@@ -194,10 +193,13 @@ func decodeSignupResponse(ctx context.Context, resp *http.Response) (interface{}
 	return response, nil
 }
 
-func decodeConcatResponse(ctx context.Context, resp *http.Response) (interface{}, error) {
+func decodeLoginResponse(ctx context.Context, resp *http.Response) (interface{}, error) {
 	var response struct {
-		V   string `json:"v"`
-		Err error  `json:"-"`
+		Status  bool        `json:"status"`
+		Message string   `json:",omitempty"`
+		Data    interface{} `json:"data"`
+		User    interface{} `json:"user"`
+		Err     error `json:"err,omitempty"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return nil, err
@@ -222,10 +224,16 @@ func decodeSignupRequest(ctx context.Context, req *http.Request) (interface{}, e
 	return request, nil
 }
 
-func decodeConcatRequest(ctx context.Context, req *http.Request) (interface{}, error) {
+func decodeLoginRequest(ctx context.Context, req *http.Request) (interface{}, error) {
 	var request struct {
-		Code string `json: "code"`
-		Type string `json" "type"`
+		ID         string    `json:"id" sql:"id"`
+		Email      string    `json:"email" validate:"required" sql:"email"`
+		Password   string    `json:"password" validate:"required" sql:"password"`
+		Username   string    `json:"username" sql:"username"`
+		TokenHash  string    `json:"tokenhash" sql:"tokenhash"`
+		IsVerified bool      `json:"isverified" sql:"isverified"`
+		CreatedAt  time.Time `json:"createdat" sql:"createdat"`
+		UpdatedAt  time.Time `json:"updatedat" sql:"updatedat"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
 		return nil, err
