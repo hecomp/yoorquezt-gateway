@@ -28,9 +28,12 @@ import (
 	"github.com/go-kit/kit/sd"
 	"github.com/go-kit/kit/sd/lb"
 	httptransport "github.com/go-kit/kit/transport/http"
+)
 
-	//"github.com/hecomp/yoorquezt-auth/pkg/yoorqueztservice"
-	//"github.com/hecomp/yoorquezt-auth/pkg/yoorquezttransport"
+const (
+	SignupPath = "/api/auth/v1/signup"
+	LoginPath = "/api/auth/v1/login"
+	VerifyMailPath = "/api/auth/v1/verify/mail"
 )
 
 func main() {
@@ -90,14 +93,21 @@ func main() {
 			instancer   = consulsd.NewInstancer(client, logger, "yoorqueztauthsvc", tags, passingOnly)
 		)
 		{
-			factory := yoorqueztauthsvcFactory(ctx, "POST", "/signup")
+			factory := yoorqueztauthsvcFactory(ctx, "POST", SignupPath)
 			endpointer := sd.NewEndpointer(instancer, factory, logger)
 			balancer := lb.NewRoundRobin(endpointer)
 			retry := lb.Retry(*retryMax, *retryTimeout, balancer)
 			uppercase = retry
 		}
 		{
-			factory := yoorqueztauthsvcFactory(ctx, "POST", "/login")
+			factory := yoorqueztauthsvcFactory(ctx, "POST", LoginPath)
+			endpointer := sd.NewEndpointer(instancer, factory, logger)
+			balancer := lb.NewRoundRobin(endpointer)
+			retry := lb.Retry(*retryMax, *retryTimeout, balancer)
+			count = retry
+		}
+		{
+			factory := yoorqueztauthsvcFactory(ctx, "POST", VerifyMailPath)
 			endpointer := sd.NewEndpointer(instancer, factory, logger)
 			balancer := lb.NewRoundRobin(endpointer)
 			retry := lb.Retry(*retryMax, *retryTimeout, balancer)
@@ -108,8 +118,9 @@ func main() {
 		// have to do provide it with the encode and decode functions for our
 		// yoorqueztauthsvc methods.
 
-		r.Handle("/yoorqueztauthsvc/signup", httptransport.NewServer(uppercase, decodeSignupRequest, encodeJSONResponse))
-		r.Handle("/yoorqueztauthsvc/login", httptransport.NewServer(count, decodeLoginRequest, encodeJSONResponse))
+		r.Handle("/yoorqueztauthsvc/api/auth/v1/signup", httptransport.NewServer(uppercase, decodeSignupRequest, encodeJSONResponse))
+		r.Handle("/yoorqueztauthsvc/api/auth/v1/login", httptransport.NewServer(count, decodeLoginRequest, encodeJSONResponse))
+		r.Handle("/yoorqueztauthsvc/api/auth/v1/verify/mail", httptransport.NewServer(count, decodeVerifyMailRequest, encodeJSONResponse))
 	}
 
 	// Interrupt handler.
@@ -152,10 +163,12 @@ func yoorqueztauthsvcFactory(ctx context.Context, method, path string) sd.Factor
 			dec httptransport.DecodeResponseFunc
 		)
 		switch path {
-		case "/signup":
+		case LoginPath:
 			enc, dec = encodeJSONRequest, decodeSignupResponse
-		case "/login":
+		case SignupPath:
 			enc, dec = encodeJSONRequest, decodeLoginResponse
+		case VerifyMailPath:
+			enc, dec = encodeJSONRequest, decodeVerifyMailResponse
 		default:
 			return nil, nil, fmt.Errorf("unknown yoorqueztauthsvc path %q", path)
 		}
@@ -207,6 +220,19 @@ func decodeLoginResponse(ctx context.Context, resp *http.Response) (interface{},
 	return response, nil
 }
 
+func decodeVerifyMailResponse(ctx context.Context, resp *http.Response) (interface{}, error) {
+	var response struct {
+		Status  bool        `json:"status"`
+		Message string   `json:",omitempty"`
+		Data    interface{} `json:"data"`
+		Err     error `json:"err,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
 func decodeSignupRequest(ctx context.Context, req *http.Request) (interface{}, error) {
 	var request struct {
 		ID         string    `json:"id" sql:"id"`
@@ -234,6 +260,26 @@ func decodeLoginRequest(ctx context.Context, req *http.Request) (interface{}, er
 		IsVerified bool      `json:"isverified" sql:"isverified"`
 		CreatedAt  time.Time `json:"createdat" sql:"createdat"`
 		UpdatedAt  time.Time `json:"updatedat" sql:"updatedat"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+		return nil, err
+	}
+	return request, nil
+}
+
+type VerificationDataType int
+
+const (
+	MailConfirmation VerificationDataType = iota + 1
+	PassReset
+)
+
+func decodeVerifyMailRequest(ctx context.Context, req *http.Request) (interface{}, error) {
+	var request struct {
+		Email     string    `json:"email" validate:"required" sql:"email"`
+		Code      string    `json:"code" validate:"required" sql:"code"`
+		ExpiresAt time.Time `json:"expiresat" sql:"expiresat"`
+		Type      VerificationDataType    `json:"type" sql:"type"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
 		return nil, err
