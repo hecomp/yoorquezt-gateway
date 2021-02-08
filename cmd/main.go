@@ -34,6 +34,7 @@ const (
 	SignupPath = "/api/auth/v1/signup"
 	LoginPath = "/api/auth/v1/login"
 	VerifyMailPath = "/api/auth/v1/verify/mail"
+	VerifyPasswordResetPath = "/api/auth/v1/verify/password-reset"
 )
 
 func main() {
@@ -113,6 +114,13 @@ func main() {
 			retry := lb.Retry(*retryMax, *retryTimeout, balancer)
 			count = retry
 		}
+		{
+			factory := yoorqueztauthsvcFactory(ctx, "POST", VerifyPasswordResetPath)
+			endpointer := sd.NewEndpointer(instancer, factory, logger)
+			balancer := lb.NewRoundRobin(endpointer)
+			retry := lb.Retry(*retryMax, *retryTimeout, balancer)
+			count = retry
+		}
 
 		// We can use the transport/http.Server to act as our handler, all we
 		// have to do provide it with the encode and decode functions for our
@@ -121,6 +129,7 @@ func main() {
 		r.Handle("/yoorqueztauthsvc/api/auth/v1/signup", httptransport.NewServer(uppercase, decodeSignupRequest, encodeJSONResponse))
 		r.Handle("/yoorqueztauthsvc/api/auth/v1/login", httptransport.NewServer(count, decodeLoginRequest, encodeJSONResponse))
 		r.Handle("/yoorqueztauthsvc/api/auth/v1/verify/mail", httptransport.NewServer(count, decodeVerifyMailRequest, encodeJSONResponse))
+		r.Handle("/yoorqueztauthsvc/api/auth/v1/verify/password-reset", httptransport.NewServer(count, decodeVerifyPasswordResetRequest, encodeJSONResponse))
 	}
 
 	// Interrupt handler.
@@ -169,6 +178,8 @@ func yoorqueztauthsvcFactory(ctx context.Context, method, path string) sd.Factor
 			enc, dec = encodeJSONRequest, decodeLoginResponse
 		case VerifyMailPath:
 			enc, dec = encodeJSONRequest, decodeVerifyMailResponse
+		case VerifyPasswordResetPath:
+			enc, dec = encodeJSONRequest, decodeVerifyPasswordResetResponse
 		default:
 			return nil, nil, fmt.Errorf("unknown yoorqueztauthsvc path %q", path)
 		}
@@ -233,6 +244,19 @@ func decodeVerifyMailResponse(ctx context.Context, resp *http.Response) (interfa
 	return response, nil
 }
 
+func decodeVerifyPasswordResetResponse(ctx context.Context, resp *http.Response) (interface{}, error) {
+	var response struct {
+		Status  bool        `json:"status"`
+		Message string   `json:",omitempty"`
+		Data    interface{} `json:"data"`
+		Err     error `json:"err,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
 func decodeSignupRequest(ctx context.Context, req *http.Request) (interface{}, error) {
 	var request struct {
 		ID         string    `json:"id" sql:"id"`
@@ -275,6 +299,19 @@ const (
 )
 
 func decodeVerifyMailRequest(ctx context.Context, req *http.Request) (interface{}, error) {
+	var request struct {
+		Email     string    `json:"email" validate:"required" sql:"email"`
+		Code      string    `json:"code" validate:"required" sql:"code"`
+		ExpiresAt time.Time `json:"expiresat" sql:"expiresat"`
+		Type      VerificationDataType    `json:"type" sql:"type"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+		return nil, err
+	}
+	return request, nil
+}
+
+func decodeVerifyPasswordResetRequest(ctx context.Context, req *http.Request) (interface{}, error) {
 	var request struct {
 		Email     string    `json:"email" validate:"required" sql:"email"`
 		Code      string    `json:"code" validate:"required" sql:"code"`
